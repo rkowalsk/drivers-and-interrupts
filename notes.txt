@@ -1,4 +1,0 @@
-- créer un misc device
-- faire tous les checks, les locks, etc
-- open close ?
-- "Load this driver when a keyboard is plugged in. Ring a bell ?" Facile nn ?
